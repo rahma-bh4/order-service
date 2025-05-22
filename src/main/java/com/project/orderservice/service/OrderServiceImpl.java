@@ -9,6 +9,8 @@ import org.springframework.transaction.annotation.Transactional;
 import com.project.orderservice.client.CustomerClient;
 import com.project.orderservice.client.ProductClient;
 import com.project.orderservice.dto.CustomerDto;
+import com.project.orderservice.dto.LoyaltyActivityDto;
+import com.project.orderservice.dto.LoyaltyActivityType;
 import com.project.orderservice.dto.OrderDto;
 import com.project.orderservice.dto.OrderItemDto;
 import com.project.orderservice.dto.ProductDto;
@@ -96,6 +98,18 @@ public class OrderServiceImpl implements OrderService {
             product.setQuantity(product.getQuantity() - itemDto.getQuantity());
             productClient.updateProduct(product.getId(), product);
         }
+        if (orderDto.getDiscountPercentage() != null && orderDto.getDiscountPercentage() > 0) {
+            // Calculate discount amount
+            double discountAmount = orderDto.getDiscountAmount() != null ? 
+                orderDto.getDiscountAmount() : totalAmount * orderDto.getDiscountPercentage();
+            
+            // Apply discount
+            totalAmount -= discountAmount;
+            
+            // Store the discount info
+            order.setDiscountPercentage(orderDto.getDiscountPercentage());
+            order.setDiscountAmount(discountAmount);
+        }
         
         // Set order items and total amount
         order.setTotalAmount(totalAmount);
@@ -142,7 +156,10 @@ public class OrderServiceImpl implements OrderService {
                 .map(this::mapToDto)
                 .collect(Collectors.toList());
     }
-    
+    private int calculateLoyaltyPoints(double orderTotal) {
+        // For example, 1 point per dollar spent
+        return (int) orderTotal;
+    }
     @Override
     @Transactional
     public OrderDto updateOrder(Long id, OrderDto orderDto) {
@@ -171,10 +188,68 @@ public class OrderServiceImpl implements OrderService {
         Order order = orderRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Order not found with id: " + id));
         
+        // Additional validation if needed
+        if (order.getStatus() == OrderStatus.CANCELLED && status != OrderStatus.CANCELLED) {
+            throw new IllegalStateException("Cannot change status of a cancelled order");
+        }
+        
+        if (order.getStatus() == OrderStatus.DELIVERED && status != OrderStatus.DELIVERED) {
+            throw new IllegalStateException("Cannot change status of a delivered order");
+        }
+       
+        
+        
+        // Validate status transition
+        validateStatusTransition(order.getStatus(), status);
+        OrderStatus oldStatus = order.getStatus();
+        // Update the status
         order.setStatus(status);
         Order updatedOrder = orderRepository.save(order);
+        if (status == OrderStatus.DELIVERED && oldStatus != OrderStatus.DELIVERED) {
+            try {
+                // Calculate points
+                int points = calculateLoyaltyPoints(order.getTotalAmount());
+                
+                // Create activity dto
+                LoyaltyActivityDto activityDto = new LoyaltyActivityDto();
+                activityDto.setType(LoyaltyActivityType.PURCHASE);
+                activityDto.setPoints(points);
+                activityDto.setAmount(order.getTotalAmount());
+                activityDto.setDescription("Points awarded for order #" + order.getId());
+                activityDto.setReferenceId(order.getId().toString());
+                
+                // Call customer service to award points
+                customerClient.addLoyaltyPoints(order.getCustomerId(), activityDto);
+                
+            } catch (FeignException e) {
+                // Log error but don't fail the order status update
+                System.err.println("Error awarding loyalty points: " + e.getMessage());
+            }
+        }
+        // If we're marking as delivered, we might want to update invoice as well
+        if (status == OrderStatus.DELIVERED) {
+            try {
+                invoiceService.updateInvoicePaymentStatus(
+                    updatedOrder.getInvoice().getId(), 
+                    "PAID"
+                );
+            } catch (Exception e) {
+                // Log but don't fail the order status update
+                System.out.println("Warning: Could not update invoice payment status: " + e.getMessage());
+            }
+        }
         
-        return mapToDto(updatedOrder);
+        OrderDto orderDto = mapToDto(updatedOrder);
+        
+        // Enrich with customer name if possible
+        try {
+            CustomerDto customer = customerClient.getCustomerById(order.getCustomerId());
+            orderDto.setCustomerName(customer.getFirstName() + " " + customer.getLastName());
+        } catch (Exception e) {
+            orderDto.setCustomerName("Unknown Customer");
+        }
+        
+        return orderDto;
     }
     
     @Override
@@ -202,6 +277,37 @@ public class OrderServiceImpl implements OrderService {
         
         // Delete order (will cascade to order items and invoice)
         orderRepository.delete(order);
+    }
+    private void validateStatusTransition(OrderStatus currentStatus, OrderStatus newStatus) {
+        // Implement your business rules for valid status transitions
+        // For example:
+        switch (currentStatus) {
+            case PENDING:
+                if (newStatus != OrderStatus.PROCESSING && newStatus != OrderStatus.CANCELLED) {
+                    throw new IllegalStateException("From PENDING, order can only move to PROCESSING or CANCELLED");
+                }
+                break;
+            case PROCESSING:
+                if (newStatus != OrderStatus.SHIPPED && newStatus != OrderStatus.CANCELLED) {
+                    throw new IllegalStateException("From PROCESSING, order can only move to SHIPPED or CANCELLED");
+                }
+                break;
+            case SHIPPED:
+                if (newStatus != OrderStatus.DELIVERED && newStatus != OrderStatus.CANCELLED) {
+                    throw new IllegalStateException("From SHIPPED, order can only move to DELIVERED or CANCELLED");
+                }
+                break;
+            case DELIVERED:
+                if (newStatus != OrderStatus.DELIVERED) {
+                    throw new IllegalStateException("DELIVERED is a final status");
+                }
+                break;
+            case CANCELLED:
+                if (newStatus != OrderStatus.CANCELLED) {
+                    throw new IllegalStateException("CANCELLED is a final status");
+                }
+                break;
+        }
     }
     
     @Override

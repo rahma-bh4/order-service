@@ -75,11 +75,18 @@ public class InvoiceServiceImpl implements InvoiceService {
         invoice.setInvoiceNumber(generateInvoiceNumber(order));
         invoice.setIssueDate(LocalDateTime.now());
         invoice.setDueDate(LocalDateTime.now().plusDays(30)); // 30 days payment term
-        invoice.setTotalAmount(order.getTotalAmount());
+        
+        // Use the order's total amount as subtotal
+        Double subtotal = order.getTotalAmount();
+        invoice.setTotalAmount(subtotal);
         
         // Calculate tax (example: 15% VAT)
         double taxRate = 0.15;
-        invoice.setTaxAmount(order.getTotalAmount() * taxRate);
+        Double taxAmount = subtotal * taxRate;
+        invoice.setTaxAmount(taxAmount);
+        
+        // FIXED: Calculate the correct total amount (subtotal + tax)
+        invoice.setTotalAmount(subtotal + taxAmount);
         
         invoice.setPaymentStatus("UNPAID");
         

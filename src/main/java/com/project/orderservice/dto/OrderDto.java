@@ -26,7 +26,9 @@ public class OrderDto {
     private OrderStatus status = OrderStatus.PENDING;
     
     private Double totalAmount;
-    
+ // In com.project.orderservice.dto.OrderDto class, add:
+    private Double discountPercentage;
+    private Double discountAmount;
     @NotEmpty(message = "Order must have at least one item")
     @Valid
     private List<OrderItemDto> items = new ArrayList<>();
